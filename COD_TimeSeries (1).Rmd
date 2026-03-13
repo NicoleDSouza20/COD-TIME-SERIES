@@ -1,0 +1,230 @@
+---
+title: "Call of Duty: A Decade of Declining Reviews"
+author: "Nicole D'Souza"
+date: "Spring Term | March 2025"
+output:
+  html_document:
+    theme: darkly
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(prophet)
+library(ggplot2)
+library(plotly)
+library(dygraphs)
+library(xts)
+library(dplyr)
+```
+
+---
+
+## 1. Introduction
+
+Call of Duty is one of the most successful video game franchises of all time, but is it getting worse? 
+
+Since its debut in 2003, a new COD title has launched almost every single year. 
+
+The series' quality has been monitored by both critics and fans using Metacritic ratings: user scores (out of 10) and critic reviews (out of 100). From the historic Modern Warfare era to the critically acclaimed Modern Warfare III (2023), which turned out to be the lowest-rated entry in franchise history, these scores span two decades and tell an intriguing and occasionally controversial story.
+
+This project uses Meta's Prophet forecasting system to model both critic and user score trends over time, and asks where is the franchise headed?
+
+---
+
+## 2. The Data
+
+The dataset contains Metacritic critic scores and user scores for every mainline Call of Duty title from 2003 to 2024. 
+
+Critic scores are on a scale of 0–100; user scores are on a scale of 0–10 (scaled here to 0–100 for direct comparison).
+
+```{r load-data}
+cod_data <- read.csv("data/cod_scores.csv")
+cod_data$user_score_scaled <- cod_data$user_score * 10
+cod_data$date <- as.Date(paste0(cod_data$year, "-11-01"))
+head(cod_data)
+```
+
+### 2.1 Critic vs User Scores Over Time
+
+Particularly after 2010, there is a noticeable discrepancy between the opinions of critics and players.
+
+```{r scores-plot}
+cod_long <- cod_data %>%
+  select(year, title, critic_score, user_score_scaled) %>%
+  tidyr::pivot_longer(cols = c(critic_score, user_score_scaled),
+                      names_to = "type", values_to = "score") %>%
+  mutate(type = ifelse(type == "critic_score", "Critic Score", "User Score (scaled)"))
+
+plot_scores <- ggplot(cod_long, aes(x = year, y = score, colour = type, group = type,
+                                     text = paste0(
+                                       "<b>", title, " (", year, ")</b><br>",
+                                       type, ": ", score))) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  scale_colour_manual(values = c("Critic Score" = "#f5a623", "User Score (scaled)" = "#e74c3c")) +
+  labs(title = "Call of Duty: Critic vs User Scores (2003–2024)",
+       x = "Year", y = "Score (out of 100)", colour = "") +
+  theme_minimal(base_size = 13) +
+  theme(plot.background = element_rect(fill = "#1a1a2e"),
+        panel.background = element_rect(fill = "#1a1a2e"),
+        text = element_text(colour = "white"),
+        axis.text = element_text(colour = "#cccccc"),
+        panel.grid.major = element_line(colour = "#333355"),
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill = "#1a1a2e"))
+
+ggplotly(plot_scores, tooltip = "text")
+```
+
+Throughout the series, user ratings dropped, going from 8.7 in 2007 to as low as 2.5 in 2023, while critics largely remained in the 73–94 range. This "review bomb" outlook came to define the present-day COD era.
+
+---
+
+## 3. Preparing Data for Prophet
+
+Prophet requires a dataframe with two columns: `ds` (date) and `y` (the value to forecast). This will run two separate Prophet models, one for critic scores and one for user scores.
+
+```{r prophet-prep}
+# Critic score prophet dataframe
+cod_critic_df <- data.frame(
+  ds = cod_data$date,
+  y  = cod_data$critic_score
+)
+
+# User score prophet dataframe (scaled to 100)
+cod_user_df <- data.frame(
+  ds = cod_data$date,
+  y  = cod_data$user_score_scaled
+)
+```
+
+---
+
+## 4. How Prophet Works
+
+Prophet, developed by Meta's Core Data Science team, models a time series as three components:
+
+$$y(t) = g(t) + s(t) + h(t) + \varepsilon_t$$
+
+Where:
+
+- $g(t)$ is the trend — the long-term direction of the data
+- $s(t)$ is seasonality — repeating patterns (not applicable here as data is annual)
+- $h(t)$ captures holiday/event effects — we use this to mark key franchise moments
+- $\varepsilon_t$ is the error term
+
+Since we have annual data (one game per year), I have disabled all seasonality components and set a moderate `changepoint.prior.scale` to allow flexibility in capturing the franchise's turbulent history.
+
+---
+
+## 5. Fitting the Models & Forecasting
+
+### 5.1 Critic Score Forecast
+
+```{r critic-model}
+cod_critic_model <- prophet::prophet(
+  cod_critic_df,
+  yearly.seasonality  = FALSE,
+  weekly.seasonality  = FALSE,
+  daily.seasonality   = FALSE,
+  changepoint.prior.scale = 0.4
+)
+
+cod_critic_future   <- prophet::make_future_dataframe(cod_critic_model, periods = 5, freq = "year")
+cod_critic_forecast <- predict(cod_critic_model, cod_critic_future)
+```
+
+### 5.2 User Score Forecast
+
+```{r user-model}
+cod_user_model <- prophet::prophet(
+  cod_user_df,
+  yearly.seasonality  = FALSE,
+  weekly.seasonality  = FALSE,
+  daily.seasonality   = FALSE,
+  changepoint.prior.scale = 0.4
+)
+
+cod_user_future   <- prophet::make_future_dataframe(cod_user_model, periods = 5, freq = "year")
+cod_user_forecast <- predict(cod_user_model, cod_user_future)
+```
+
+### 5.3 Interactive Forecast: Critic Scores
+
+```{r critic-dygraph}
+critic_xts <- xts(
+  cbind(cod_critic_forecast$yhat,
+        cod_critic_forecast$yhat_lower,
+        cod_critic_forecast$yhat_upper),
+  order.by = as.Date(cod_critic_forecast$ds)
+)
+colnames(critic_xts) <- c("Forecast", "Lower", "Upper")
+
+dygraph(critic_xts, main = "Critic Score Forecast (2024–2029)") %>%
+  dySeries(c("Lower", "Forecast", "Upper"), label = "Critic Score") %>%
+  dyShading(from = "2024-01-01", to = "2029-01-01", color = "#FFE8D6") %>%
+  dyEvent("2007-11-01", "MW1", labelLoc = "bottom") %>%
+  dyEvent("2009-11-01", "MW2", labelLoc = "bottom") %>%
+  dyEvent("2023-11-01", "MW3 (worst ever)", labelLoc = "bottom") %>%
+  dyOptions(fillGraph = TRUE, fillAlpha = 0.1,
+            colors = c("#f5a623")) %>%
+  dyRangeSelector()
+```
+
+### 5.4 Interactive Forecast: User Scores
+
+```{r user-dygraph}
+user_xts <- xts(
+  cbind(cod_user_forecast$yhat,
+        cod_user_forecast$yhat_lower,
+        cod_user_forecast$yhat_upper),
+  order.by = as.Date(cod_user_forecast$ds)
+)
+colnames(user_xts) <- c("Forecast", "Lower", "Upper")
+
+dygraph(user_xts, main = "User Score Forecast (2024–2029)") %>%
+  dySeries(c("Lower", "Forecast", "Upper"), label = "User Score (scaled)") %>%
+  dyShading(from = "2024-01-01", to = "2029-01-01", color = "#FFE8D6") %>%
+  dyEvent("2007-11-01", "MW1 Peak", labelLoc = "bottom") %>%
+  dyEvent("2011-11-01", "Review Bomb Era", labelLoc = "bottom") %>%
+  dyOptions(fillGraph = TRUE, fillAlpha = 0.1,
+            colors = c("#e74c3c")) %>%
+  dyRangeSelector()
+```
+
+### 5.5 Trend Components
+
+```{r components}
+prophet::prophet_plot_components(cod_critic_model, cod_critic_forecast)
+```
+
+---
+
+## 6. Conclusion
+
+The data tells a clear story. Call of Duty's critic scores have declined moderately over two decades, from a high of 94 (Modern Warfare, 2007) to 56 (Modern Warfare III, 2023), with Prophet forecasting a continued gentle downward trend toward the late 2020s.
+
+The user score collapse is far more dramatic. The gap between critics and players widened significantly after 2011, driven by review-bombing, franchise fatigue, and controversies around live-service monetisation.
+
+Prophet predicts user scores stabilising at a low level, suggesting players have adjusted their expectations.
+
+| Era | Years | Avg Critic | Avg User (scaled) |
+|-----|-------|------------|-------------------|
+| WWII Origins | 2003–2006 | 84 | 77 |
+| Modern Warfare Peak | 2007–2011 | 88 | 62 |
+| Black Ops Era | 2012–2015 | 80 | 47 |
+| Futuristic Era | 2016–2018 | 81 | 43 |
+| Warzone Era | 2019–2024 | 73 | 46 |
+
+Whether Call of Duty can recover its critical and fan reception remains to be seen, but the Prophet model suggests the franchise is, at best, plateauing.
+
+---
+
+## References
+
+- Metacritic (2024). *Call of Duty series scores*. https://www.metacritic.com
+- Taylor, S.J. & Letham, B. (2018). Forecasting at scale. *The American Statistician*, 72(1), 37–45.
+- Activision (2024). *Call of Duty official website*. https://www.callofduty.com
